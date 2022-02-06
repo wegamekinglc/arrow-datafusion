@@ -17,6 +17,7 @@
 
 mod aggregate_function;
 mod expr;
+mod field_util;
 mod operator;
 mod window_function;
 

@@ -16,6 +16,7 @@
 // under the License.
 
 use crate::aggregate_function::AggregateFunction;
+use arrow::datatypes::DataType;
 use datafusion_common::{DataFusionError, Result};
 use std::{fmt, str::FromStr};
 
@@ -129,6 +130,83 @@ impl FromStr for BuiltInWindowFunction {
                 )))
             }
         })
+    }
+}
+
+/// Returns the datatype of the window function
+pub fn return_type(
+    fun: &WindowFunction,
+    input_expr_types: &[DataType],
+) -> Result<DataType> {
+    match fun {
+        WindowFunction::AggregateFunction(fun) => {
+            aggregates::return_type(fun, input_expr_types)
+        }
+        WindowFunction::BuiltInWindowFunction(fun) => {
+            return_type_for_built_in(fun, input_expr_types)
+        }
+    }
+}
+
+/// Returns the datatype of the built-in window function
+pub(super) fn return_type_for_built_in(
+    fun: &BuiltInWindowFunction,
+    input_expr_types: &[DataType],
+) -> Result<DataType> {
+    // Note that this function *must* return the same type that the respective physical expression returns
+    // or the execution panics.
+
+    // verify that this is a valid set of data types for this function
+    data_types(input_expr_types, &signature_for_built_in(fun))?;
+
+    match fun {
+        BuiltInWindowFunction::RowNumber
+        | BuiltInWindowFunction::Rank
+        | BuiltInWindowFunction::DenseRank => Ok(DataType::UInt64),
+        BuiltInWindowFunction::PercentRank | BuiltInWindowFunction::CumeDist => {
+            Ok(DataType::Float64)
+        }
+        BuiltInWindowFunction::Ntile => Ok(DataType::UInt32),
+        BuiltInWindowFunction::Lag
+        | BuiltInWindowFunction::Lead
+        | BuiltInWindowFunction::FirstValue
+        | BuiltInWindowFunction::LastValue
+        | BuiltInWindowFunction::NthValue => Ok(input_expr_types[0].clone()),
+    }
+}
+
+/// the signatures supported by the function `fun`.
+pub fn signature(fun: &WindowFunction) -> Signature {
+    match fun {
+        WindowFunction::AggregateFunction(fun) => aggregates::signature(fun),
+        WindowFunction::BuiltInWindowFunction(fun) => signature_for_built_in(fun),
+    }
+}
+
+/// the signatures supported by the built-in window function `fun`.
+pub(super) fn signature_for_built_in(fun: &BuiltInWindowFunction) -> Signature {
+    // note: the physical expression must accept the type returned by this function or the execution panics.
+    match fun {
+        BuiltInWindowFunction::RowNumber
+        | BuiltInWindowFunction::Rank
+        | BuiltInWindowFunction::DenseRank
+        | BuiltInWindowFunction::PercentRank
+        | BuiltInWindowFunction::CumeDist => Signature::any(0, Volatility::Immutable),
+        BuiltInWindowFunction::Lag | BuiltInWindowFunction::Lead => Signature::one_of(
+            vec![
+                TypeSignature::Any(1),
+                TypeSignature::Any(2),
+                TypeSignature::Any(3),
+            ],
+            Volatility::Immutable,
+        ),
+        BuiltInWindowFunction::FirstValue | BuiltInWindowFunction::LastValue => {
+            Signature::any(1, Volatility::Immutable)
+        }
+        BuiltInWindowFunction::Ntile => {
+            Signature::exact(vec![DataType::UInt64], Volatility::Immutable)
+        }
+        BuiltInWindowFunction::NthValue => Signature::any(2, Volatility::Immutable),
     }
 }
 
