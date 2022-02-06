@@ -147,8 +147,6 @@ pub fn when(when: Expr, then: Expr) -> CaseBuilder {
     }
 }
 
-
-
 /// return a new expression with a logical AND
 pub fn and(left: Expr, right: Expr) -> Expr {
     Expr::BinaryExpr {
