@@ -38,3 +38,4 @@ path = "src/lib.rs"
 [dependencies]
 datafusion-common = { path = "../datafusion-common" }
 arrow = { version = "8.0.0", features = ["prettyprint"] }
+sqlparser = "0.13"
