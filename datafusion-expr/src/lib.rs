@@ -16,7 +16,11 @@
 // under the License.
 
 mod aggregate_function;
+mod expr;
+mod operator;
 mod window_function;
 
 pub use aggregate_function::AggregateFunction;
+pub use expr::Expr;
+pub use operator::Operator;
 pub use window_function::{BuiltInWindowFunction, WindowFunction};
