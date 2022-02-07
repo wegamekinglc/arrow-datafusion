@@ -557,128 +557,13 @@ impl Expr {
             nulls_first,
         }
     }
+}
 
-    /// Performs a depth first walk of an expression and
-    /// its children, calling [`ExpressionVisitor::pre_visit`] and
-    /// `visitor.post_visit`.
-    ///
-    /// Implements the [visitor pattern](https://en.wikipedia.org/wiki/Visitor_pattern) to
-    /// separate expression algorithms from the structure of the
-    /// `Expr` tree and make it easier to add new types of expressions
-    /// and algorithms that walk the tree.
-    ///
-    /// For an expression tree such as
-    /// ```text
-    /// BinaryExpr (GT)
-    ///    left: Column("foo")
-    ///    right: Column("bar")
-    /// ```
-    ///
-    /// The nodes are visited using the following order
-    /// ```text
-    /// pre_visit(BinaryExpr(GT))
-    /// pre_visit(Column("foo"))
-    /// pre_visit(Column("bar"))
-    /// post_visit(Column("bar"))
-    /// post_visit(Column("bar"))
-    /// post_visit(BinaryExpr(GT))
-    /// ```
-    ///
-    /// If an Err result is returned, recursion is stopped immediately
-    ///
-    /// If `Recursion::Stop` is returned on a call to pre_visit, no
-    /// children of that expression are visited, nor is post_visit
-    /// called on that expression
-    ///
-    pub fn accept<V: ExpressionVisitor>(&self, visitor: V) -> Result<V> {
-        let visitor = match visitor.pre_visit(self)? {
-            Recursion::Continue(visitor) => visitor,
-            // If the recursion should stop, do not visit children
-            Recursion::Stop(visitor) => return Ok(visitor),
-        };
+pub(crate) trait ExprRewritable: Sized {
+    fn rewrite<R: ExprRewriter>(self, rewriter: &mut R) -> Result<Self>;
+}
 
-        // recurse (and cover all expression types)
-        let visitor = match self {
-            Expr::Alias(expr, _)
-            | Expr::Not(expr)
-            | Expr::IsNotNull(expr)
-            | Expr::IsNull(expr)
-            | Expr::Negative(expr)
-            | Expr::Cast { expr, .. }
-            | Expr::TryCast { expr, .. }
-            | Expr::Sort { expr, .. }
-            | Expr::GetIndexedField { expr, .. } => expr.accept(visitor),
-            Expr::Column(_)
-            | Expr::ScalarVariable(_)
-            | Expr::Literal(_)
-            | Expr::Wildcard => Ok(visitor),
-            Expr::BinaryExpr { left, right, .. } => {
-                let visitor = left.accept(visitor)?;
-                right.accept(visitor)
-            }
-            Expr::Between {
-                expr, low, high, ..
-            } => {
-                let visitor = expr.accept(visitor)?;
-                let visitor = low.accept(visitor)?;
-                high.accept(visitor)
-            }
-            Expr::Case {
-                expr,
-                when_then_expr,
-                else_expr,
-            } => {
-                let visitor = if let Some(expr) = expr.as_ref() {
-                    expr.accept(visitor)
-                } else {
-                    Ok(visitor)
-                }?;
-                let visitor = when_then_expr.iter().try_fold(
-                    visitor,
-                    |visitor, (when, then)| {
-                        let visitor = when.accept(visitor)?;
-                        then.accept(visitor)
-                    },
-                )?;
-                if let Some(else_expr) = else_expr.as_ref() {
-                    else_expr.accept(visitor)
-                } else {
-                    Ok(visitor)
-                }
-            }
-            Expr::ScalarFunction { args, .. }
-            | Expr::ScalarUDF { args, .. }
-            | Expr::AggregateFunction { args, .. }
-            | Expr::AggregateUDF { args, .. } => args
-                .iter()
-                .try_fold(visitor, |visitor, arg| arg.accept(visitor)),
-            Expr::WindowFunction {
-                args,
-                partition_by,
-                order_by,
-                ..
-            } => {
-                let visitor = args
-                    .iter()
-                    .try_fold(visitor, |visitor, arg| arg.accept(visitor))?;
-                let visitor = partition_by
-                    .iter()
-                    .try_fold(visitor, |visitor, arg| arg.accept(visitor))?;
-                let visitor = order_by
-                    .iter()
-                    .try_fold(visitor, |visitor, arg| arg.accept(visitor))?;
-                Ok(visitor)
-            }
-            Expr::InList { expr, list, .. } => {
-                let visitor = expr.accept(visitor)?;
-                list.iter()
-                    .try_fold(visitor, |visitor, arg| arg.accept(visitor))
-            }
-        }?;
-
-        visitor.post_visit(self)
-    }
-
+impl ExprRewritable for Expr {
     /// Performs a depth first walk of an expression and its children
     /// to rewrite an expression, consuming `self` producing a new
     /// [`Expr`].
@@ -712,7 +597,7 @@ impl Expr {
     /// children of that expression are visited, nor is mutate
     /// called on that expression
     ///
-    pub fn rewrite<R>(self, rewriter: &mut R) -> Result<Self>
+    fn rewrite<R>(self, rewriter: &mut R) -> Result<Self>
     where
         R: ExprRewriter,
     {
@@ -847,7 +732,140 @@ impl Expr {
             Ok(expr)
         }
     }
+}
 
+pub(crate) trait ExprVisitable {
+    fn accept<V: ExpressionVisitor>(&self, visitor: V) -> Result<V>;
+}
+
+impl ExprVisitable for Expr {
+    /// Performs a depth first walk of an expression and
+    /// its children, calling [`ExpressionVisitor::pre_visit`] and
+    /// `visitor.post_visit`.
+    ///
+    /// Implements the [visitor pattern](https://en.wikipedia.org/wiki/Visitor_pattern) to
+    /// separate expression algorithms from the structure of the
+    /// `Expr` tree and make it easier to add new types of expressions
+    /// and algorithms that walk the tree.
+    ///
+    /// For an expression tree such as
+    /// ```text
+    /// BinaryExpr (GT)
+    ///    left: Column("foo")
+    ///    right: Column("bar")
+    /// ```
+    ///
+    /// The nodes are visited using the following order
+    /// ```text
+    /// pre_visit(BinaryExpr(GT))
+    /// pre_visit(Column("foo"))
+    /// pre_visit(Column("bar"))
+    /// post_visit(Column("bar"))
+    /// post_visit(Column("bar"))
+    /// post_visit(BinaryExpr(GT))
+    /// ```
+    ///
+    /// If an Err result is returned, recursion is stopped immediately
+    ///
+    /// If `Recursion::Stop` is returned on a call to pre_visit, no
+    /// children of that expression are visited, nor is post_visit
+    /// called on that expression
+    ///
+    fn accept<V: ExpressionVisitor>(&self, visitor: V) -> Result<V> {
+        let visitor = match visitor.pre_visit(self)? {
+            Recursion::Continue(visitor) => visitor,
+            // If the recursion should stop, do not visit children
+            Recursion::Stop(visitor) => return Ok(visitor),
+        };
+
+        // recurse (and cover all expression types)
+        let visitor = match self {
+            Expr::Alias(expr, _)
+            | Expr::Not(expr)
+            | Expr::IsNotNull(expr)
+            | Expr::IsNull(expr)
+            | Expr::Negative(expr)
+            | Expr::Cast { expr, .. }
+            | Expr::TryCast { expr, .. }
+            | Expr::Sort { expr, .. }
+            | Expr::GetIndexedField { expr, .. } => expr.accept(visitor),
+            Expr::Column(_)
+            | Expr::ScalarVariable(_)
+            | Expr::Literal(_)
+            | Expr::Wildcard => Ok(visitor),
+            Expr::BinaryExpr { left, right, .. } => {
+                let visitor = left.accept(visitor)?;
+                right.accept(visitor)
+            }
+            Expr::Between {
+                expr, low, high, ..
+            } => {
+                let visitor = expr.accept(visitor)?;
+                let visitor = low.accept(visitor)?;
+                high.accept(visitor)
+            }
+            Expr::Case {
+                expr,
+                when_then_expr,
+                else_expr,
+            } => {
+                let visitor = if let Some(expr) = expr.as_ref() {
+                    expr.accept(visitor)
+                } else {
+                    Ok(visitor)
+                }?;
+                let visitor = when_then_expr.iter().try_fold(
+                    visitor,
+                    |visitor, (when, then)| {
+                        let visitor = when.accept(visitor)?;
+                        then.accept(visitor)
+                    },
+                )?;
+                if let Some(else_expr) = else_expr.as_ref() {
+                    else_expr.accept(visitor)
+                } else {
+                    Ok(visitor)
+                }
+            }
+            Expr::ScalarFunction { args, .. }
+            | Expr::ScalarUDF { args, .. }
+            | Expr::AggregateFunction { args, .. }
+            | Expr::AggregateUDF { args, .. } => args
+                .iter()
+                .try_fold(visitor, |visitor, arg| arg.accept(visitor)),
+            Expr::WindowFunction {
+                args,
+                partition_by,
+                order_by,
+                ..
+            } => {
+                let visitor = args
+                    .iter()
+                    .try_fold(visitor, |visitor, arg| arg.accept(visitor))?;
+                let visitor = partition_by
+                    .iter()
+                    .try_fold(visitor, |visitor, arg| arg.accept(visitor))?;
+                let visitor = order_by
+                    .iter()
+                    .try_fold(visitor, |visitor, arg| arg.accept(visitor))?;
+                Ok(visitor)
+            }
+            Expr::InList { expr, list, .. } => {
+                let visitor = expr.accept(visitor)?;
+                list.iter()
+                    .try_fold(visitor, |visitor, arg| arg.accept(visitor))
+            }
+        }?;
+
+        visitor.post_visit(self)
+    }
+}
+
+pub(crate) trait ExprSimplifiable: Sized {
+    fn simplify<S: SimplifyInfo>(self, info: &S) -> Result<Self>;
+}
+
+impl ExprSimplifiable for Expr {
     /// Simplifies this [`Expr`]`s as much as possible, evaluating
     /// constants and applying algebraic simplifications
     ///
@@ -889,7 +907,7 @@ impl Expr {
     /// let expr = expr.simplify(&Info::default()).unwrap();
     /// assert_eq!(expr, b_lt_2);
     /// ```
-    pub fn simplify<S: SimplifyInfo>(self, info: &S) -> Result<Self> {
+    fn simplify<S: SimplifyInfo>(self, info: &S) -> Result<Self> {
         let mut rewriter = Simplifier::new(info);
         let mut const_evaluator = ConstEvaluator::new(info.execution_props());
 

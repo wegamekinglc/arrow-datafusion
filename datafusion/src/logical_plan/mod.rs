@@ -49,6 +49,7 @@ pub use expr::{
     Column, Expr, ExprRewriter, ExprSchema, ExpressionVisitor, Literal, Recursion,
     RewriteRecursion, SimplifyInfo,
 };
+pub(crate) use expr::{ExprRewritable, ExprSimplifiable, ExprVisitable};
 pub use extension::UserDefinedLogicalNode;
 pub use operators::Operator;
 pub use plan::{
