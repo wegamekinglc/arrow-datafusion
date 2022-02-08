@@ -20,12 +20,8 @@
 
 pub use super::Operator;
 use crate::error::{DataFusionError, Result};
-use crate::execution::context::ExecutionProps;
 use crate::field_util::get_indexed_field;
-use crate::logical_plan::{
-    plan::Aggregate, window_frames, DFField, DFSchema, LogicalPlan,
-};
-use crate::optimizer::simplify_expressions::{ConstEvaluator, Simplifier};
+use crate::logical_plan::{window_frames, DFField, DFSchema};
 use crate::physical_plan::functions::Volatility;
 use crate::physical_plan::{
     aggregates, expressions::binary_operator_data_type, functions, udf::ScalarUDF,
@@ -36,7 +32,7 @@ use aggregates::{AccumulatorFunctionImplementation, StateTypeFunction};
 use arrow::{compute::can_cast_types, datatypes::DataType};
 pub use datafusion_common::{Column, ExprSchema};
 use functions::{ReturnTypeFunction, ScalarFunctionImplementation, Signature};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::ops::Not;
@@ -760,109 +756,6 @@ pub fn columnize_expr(e: Expr, input_schema: &DFSchema) -> Expr {
             Err(_) => e,
         },
     }
-}
-
-/// Recursively replace all Column expressions in a given expression tree with Column expressions
-/// provided by the hash map argument.
-pub fn replace_col(e: Expr, replace_map: &HashMap<&Column, &Column>) -> Result<Expr> {
-    struct ColumnReplacer<'a> {
-        replace_map: &'a HashMap<&'a Column, &'a Column>,
-    }
-
-    impl<'a> ExprRewriter for ColumnReplacer<'a> {
-        fn mutate(&mut self, expr: Expr) -> Result<Expr> {
-            if let Expr::Column(c) = &expr {
-                match self.replace_map.get(c) {
-                    Some(new_c) => Ok(Expr::Column((*new_c).to_owned())),
-                    None => Ok(expr),
-                }
-            } else {
-                Ok(expr)
-            }
-        }
-    }
-
-    e.rewrite(&mut ColumnReplacer { replace_map })
-}
-
-/// Recursively call [`Column::normalize`] on all Column expressions
-/// in the `expr` expression tree.
-pub fn normalize_col(expr: Expr, plan: &LogicalPlan) -> Result<Expr> {
-    normalize_col_with_schemas(expr, &plan.all_schemas(), &plan.using_columns()?)
-}
-
-/// Recursively call [`Column::normalize`] on all Column expressions
-/// in the `expr` expression tree.
-fn normalize_col_with_schemas(
-    expr: Expr,
-    schemas: &[&Arc<DFSchema>],
-    using_columns: &[HashSet<Column>],
-) -> Result<Expr> {
-    struct ColumnNormalizer<'a> {
-        schemas: &'a [&'a Arc<DFSchema>],
-        using_columns: &'a [HashSet<Column>],
-    }
-
-    impl<'a> ExprRewriter for ColumnNormalizer<'a> {
-        fn mutate(&mut self, expr: Expr) -> Result<Expr> {
-            if let Expr::Column(c) = expr {
-                Ok(Expr::Column(c.normalize_with_schemas(
-                    self.schemas,
-                    self.using_columns,
-                )?))
-            } else {
-                Ok(expr)
-            }
-        }
-    }
-
-    expr.rewrite(&mut ColumnNormalizer {
-        schemas,
-        using_columns,
-    })
-}
-
-/// Recursively normalize all Column expressions in a list of expression trees
-pub fn normalize_cols(
-    exprs: impl IntoIterator<Item = impl Into<Expr>>,
-    plan: &LogicalPlan,
-) -> Result<Vec<Expr>> {
-    exprs
-        .into_iter()
-        .map(|e| normalize_col(e.into(), plan))
-        .collect()
-}
-
-/// Recursively 'unnormalize' (remove all qualifiers) from an
-/// expression tree.
-///
-/// For example, if there were expressions like `foo.bar` this would
-/// rewrite it to just `bar`.
-pub fn unnormalize_col(expr: Expr) -> Expr {
-    struct RemoveQualifier {}
-
-    impl ExprRewriter for RemoveQualifier {
-        fn mutate(&mut self, expr: Expr) -> Result<Expr> {
-            if let Expr::Column(col) = expr {
-                //let Column { relation: _, name } = col;
-                Ok(Expr::Column(Column {
-                    relation: None,
-                    name: col.name,
-                }))
-            } else {
-                Ok(expr)
-            }
-        }
-    }
-
-    expr.rewrite(&mut RemoveQualifier {})
-        .expect("Unnormalize is infallable")
-}
-
-/// Recursively un-normalize all Column expressions in a list of expression trees
-#[inline]
-pub fn unnormalize_cols(exprs: impl IntoIterator<Item = Expr>) -> Vec<Expr> {
-    exprs.into_iter().map(unnormalize_col).collect()
 }
 
 /// Recursively un-alias an expressions
