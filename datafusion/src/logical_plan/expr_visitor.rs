@@ -33,19 +33,21 @@ pub enum Recursion<V: ExpressionVisitor> {
 /// `Expr::accept`, `ExpressionVisitor::visit` is invoked
 /// recursively on all nodes of an expression tree. See the comments
 /// on `Expr::accept` for details on its use
-pub trait ExpressionVisitor: Sized {
+pub trait ExpressionVisitor<E: ExprVisitable = Expr>: Sized {
     /// Invoked before any children of `expr` are visisted.
-    fn pre_visit(self, expr: &Expr) -> Result<Recursion<Self>>;
+    fn pre_visit(self, expr: &E) -> Result<Recursion<Self>>
+    where
+        Self: ExpressionVisitor;
 
     /// Invoked after all children of `expr` are visited. Default
     /// implementation does nothing.
-    fn post_visit(self, _expr: &Expr) -> Result<Self> {
+    fn post_visit(self, _expr: &E) -> Result<Self> {
         Ok(self)
     }
 }
 
-pub trait ExprVisitable {
-    fn accept<V: ExpressionVisitor>(&self, visitor: V) -> Result<V>;
+pub trait ExprVisitable: Sized {
+    fn accept<V: ExpressionVisitor<Self>>(&self, visitor: V) -> Result<V>;
 }
 
 impl ExprVisitable for Expr {

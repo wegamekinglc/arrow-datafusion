@@ -43,20 +43,20 @@ pub enum RewriteRecursion {
 /// tree. When passed to `Expr::rewrite`, `ExpressionVisitor::mutate` is
 /// invoked recursively on all nodes of an expression tree. See the
 /// comments on `Expr::rewrite` for details on its use
-pub trait ExprRewriter: Sized {
+pub trait ExprRewriter<E: ExprRewritable = Expr>: Sized {
     /// Invoked before any children of `expr` are rewritten /
     /// visited. Default implementation returns `Ok(RewriteRecursion::Continue)`
-    fn pre_visit(&mut self, _expr: &Expr) -> Result<RewriteRecursion> {
+    fn pre_visit(&mut self, _expr: &E) -> Result<RewriteRecursion> {
         Ok(RewriteRecursion::Continue)
     }
 
     /// Invoked after all children of `expr` have been mutated and
     /// returns a potentially modified expr.
-    fn mutate(&mut self, expr: Expr) -> Result<Expr>;
+    fn mutate(&mut self, expr: E) -> Result<E>;
 }
 
 pub trait ExprRewritable: Sized {
-    fn rewrite<R: ExprRewriter>(self, rewriter: &mut R) -> Result<Self>;
+    fn rewrite<R: ExprRewriter<Self>>(self, rewriter: &mut R) -> Result<Self>;
 }
 
 impl ExprRewritable for Expr {
@@ -95,7 +95,7 @@ impl ExprRewritable for Expr {
     ///
     fn rewrite<R>(self, rewriter: &mut R) -> Result<Self>
     where
-        R: ExprRewriter,
+        R: ExprRewriter<Self>,
     {
         let need_mutate = match rewriter.pre_visit(&self)? {
             RewriteRecursion::Mutate => return rewriter.mutate(self),
