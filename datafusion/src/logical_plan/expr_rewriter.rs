@@ -1,0 +1,330 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+//! Expression rewriter
+
+use super::Expr;
+use datafusion_common::{DataFusionError, Result};
+
+/// Controls how the [ExprRewriter] recursion should proceed.
+pub enum RewriteRecursion {
+    /// Continue rewrite / visit this expression.
+    Continue,
+    /// Call [mutate()] immediately and return.
+    Mutate,
+    /// Do not rewrite / visit the children of this expression.
+    Stop,
+    /// Keep recursive but skip mutate on this expression
+    Skip,
+}
+
+/// Trait for potentially recursively rewriting an [`Expr`] expression
+/// tree. When passed to `Expr::rewrite`, `ExpressionVisitor::mutate` is
+/// invoked recursively on all nodes of an expression tree. See the
+/// comments on `Expr::rewrite` for details on its use
+pub trait ExprRewriter: Sized {
+    /// Invoked before any children of `expr` are rewritten /
+    /// visited. Default implementation returns `Ok(RewriteRecursion::Continue)`
+    fn pre_visit(&mut self, _expr: &Expr) -> Result<RewriteRecursion> {
+        Ok(RewriteRecursion::Continue)
+    }
+
+    /// Invoked after all children of `expr` have been mutated and
+    /// returns a potentially modified expr.
+    fn mutate(&mut self, expr: Expr) -> Result<Expr>;
+}
+
+pub trait ExprRewritable: Sized {
+    fn rewrite<R: ExprRewriter>(self, rewriter: &mut R) -> Result<Self>;
+}
+
+impl ExprRewritable for Expr {
+    /// Performs a depth first walk of an expression and its children
+    /// to rewrite an expression, consuming `self` producing a new
+    /// [`Expr`].
+    ///
+    /// Implements a modified version of the [visitor
+    /// pattern](https://en.wikipedia.org/wiki/Visitor_pattern) to
+    /// separate algorithms from the structure of the `Expr` tree and
+    /// make it easier to write new, efficient expression
+    /// transformation algorithms.
+    ///
+    /// For an expression tree such as
+    /// ```text
+    /// BinaryExpr (GT)
+    ///    left: Column("foo")
+    ///    right: Column("bar")
+    /// ```
+    ///
+    /// The nodes are visited using the following order
+    /// ```text
+    /// pre_visit(BinaryExpr(GT))
+    /// pre_visit(Column("foo"))
+    /// mutatate(Column("foo"))
+    /// pre_visit(Column("bar"))
+    /// mutate(Column("bar"))
+    /// mutate(BinaryExpr(GT))
+    /// ```
+    ///
+    /// If an Err result is returned, recursion is stopped immediately
+    ///
+    /// If [`false`] is returned on a call to pre_visit, no
+    /// children of that expression are visited, nor is mutate
+    /// called on that expression
+    ///
+    fn rewrite<R>(self, rewriter: &mut R) -> Result<Self>
+    where
+        R: ExprRewriter,
+    {
+        let need_mutate = match rewriter.pre_visit(&self)? {
+            RewriteRecursion::Mutate => return rewriter.mutate(self),
+            RewriteRecursion::Stop => return Ok(self),
+            RewriteRecursion::Continue => true,
+            RewriteRecursion::Skip => false,
+        };
+
+        // recurse into all sub expressions(and cover all expression types)
+        let expr = match self {
+            Expr::Alias(expr, name) => Expr::Alias(rewrite_boxed(expr, rewriter)?, name),
+            Expr::Column(_) => self.clone(),
+            Expr::ScalarVariable(names) => Expr::ScalarVariable(names),
+            Expr::Literal(value) => Expr::Literal(value),
+            Expr::BinaryExpr { left, op, right } => Expr::BinaryExpr {
+                left: rewrite_boxed(left, rewriter)?,
+                op,
+                right: rewrite_boxed(right, rewriter)?,
+            },
+            Expr::Not(expr) => Expr::Not(rewrite_boxed(expr, rewriter)?),
+            Expr::IsNotNull(expr) => Expr::IsNotNull(rewrite_boxed(expr, rewriter)?),
+            Expr::IsNull(expr) => Expr::IsNull(rewrite_boxed(expr, rewriter)?),
+            Expr::Negative(expr) => Expr::Negative(rewrite_boxed(expr, rewriter)?),
+            Expr::Between {
+                expr,
+                low,
+                high,
+                negated,
+            } => Expr::Between {
+                expr: rewrite_boxed(expr, rewriter)?,
+                low: rewrite_boxed(low, rewriter)?,
+                high: rewrite_boxed(high, rewriter)?,
+                negated,
+            },
+            Expr::Case {
+                expr,
+                when_then_expr,
+                else_expr,
+            } => {
+                let expr = rewrite_option_box(expr, rewriter)?;
+                let when_then_expr = when_then_expr
+                    .into_iter()
+                    .map(|(when, then)| {
+                        Ok((
+                            rewrite_boxed(when, rewriter)?,
+                            rewrite_boxed(then, rewriter)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+
+                let else_expr = rewrite_option_box(else_expr, rewriter)?;
+
+                Expr::Case {
+                    expr,
+                    when_then_expr,
+                    else_expr,
+                }
+            }
+            Expr::Cast { expr, data_type } => Expr::Cast {
+                expr: rewrite_boxed(expr, rewriter)?,
+                data_type,
+            },
+            Expr::TryCast { expr, data_type } => Expr::TryCast {
+                expr: rewrite_boxed(expr, rewriter)?,
+                data_type,
+            },
+            Expr::Sort {
+                expr,
+                asc,
+                nulls_first,
+            } => Expr::Sort {
+                expr: rewrite_boxed(expr, rewriter)?,
+                asc,
+                nulls_first,
+            },
+            Expr::ScalarFunction { args, fun } => Expr::ScalarFunction {
+                args: rewrite_vec(args, rewriter)?,
+                fun,
+            },
+            Expr::ScalarUDF { args, fun } => Expr::ScalarUDF {
+                args: rewrite_vec(args, rewriter)?,
+                fun,
+            },
+            Expr::WindowFunction {
+                args,
+                fun,
+                partition_by,
+                order_by,
+                window_frame,
+            } => Expr::WindowFunction {
+                args: rewrite_vec(args, rewriter)?,
+                fun,
+                partition_by: rewrite_vec(partition_by, rewriter)?,
+                order_by: rewrite_vec(order_by, rewriter)?,
+                window_frame,
+            },
+            Expr::AggregateFunction {
+                args,
+                fun,
+                distinct,
+            } => Expr::AggregateFunction {
+                args: rewrite_vec(args, rewriter)?,
+                fun,
+                distinct,
+            },
+            Expr::AggregateUDF { args, fun } => Expr::AggregateUDF {
+                args: rewrite_vec(args, rewriter)?,
+                fun,
+            },
+            Expr::InList {
+                expr,
+                list,
+                negated,
+            } => Expr::InList {
+                expr: rewrite_boxed(expr, rewriter)?,
+                list: rewrite_vec(list, rewriter)?,
+                negated,
+            },
+            Expr::Wildcard => Expr::Wildcard,
+            Expr::GetIndexedField { expr, key } => Expr::GetIndexedField {
+                expr: rewrite_boxed(expr, rewriter)?,
+                key,
+            },
+        };
+
+        // now rewrite this expression itself
+        if need_mutate {
+            rewriter.mutate(expr)
+        } else {
+            Ok(expr)
+        }
+    }
+}
+
+#[allow(clippy::boxed_local)]
+fn rewrite_boxed<R>(boxed_expr: Box<Expr>, rewriter: &mut R) -> Result<Box<Expr>>
+where
+    R: ExprRewriter,
+{
+    // TODO: It might be possible to avoid an allocation (the
+    // Box::new) below by reusing the box.
+    let expr: Expr = *boxed_expr;
+    let rewritten_expr = expr.rewrite(rewriter)?;
+    Ok(Box::new(rewritten_expr))
+}
+
+fn rewrite_option_box<R>(
+    option_box: Option<Box<Expr>>,
+    rewriter: &mut R,
+) -> Result<Option<Box<Expr>>>
+where
+    R: ExprRewriter,
+{
+    option_box
+        .map(|expr| rewrite_boxed(expr, rewriter))
+        .transpose()
+}
+
+/// rewrite a `Vec` of `Expr`s with the rewriter
+fn rewrite_vec<R>(v: Vec<Expr>, rewriter: &mut R) -> Result<Vec<Expr>>
+where
+    R: ExprRewriter,
+{
+    v.into_iter().map(|expr| expr.rewrite(rewriter)).collect()
+}
+
+/// Rewrite sort on aggregate expressions to sort on the column of aggregate output
+/// For example, `max(x)` is written to `col("MAX(x)")`
+pub fn rewrite_sort_cols_by_aggs(
+    exprs: impl IntoIterator<Item = impl Into<Expr>>,
+    plan: &LogicalPlan,
+) -> Result<Vec<Expr>> {
+    exprs
+        .into_iter()
+        .map(|e| {
+            let expr = e.into();
+            match expr {
+                Expr::Sort {
+                    expr,
+                    asc,
+                    nulls_first,
+                } => {
+                    let sort = Expr::Sort {
+                        expr: Box::new(rewrite_sort_col_by_aggs(*expr, plan)?),
+                        asc,
+                        nulls_first,
+                    };
+                    Ok(sort)
+                }
+                expr => Ok(expr),
+            }
+        })
+        .collect()
+}
+
+fn rewrite_sort_col_by_aggs(expr: Expr, plan: &LogicalPlan) -> Result<Expr> {
+    match plan {
+        LogicalPlan::Aggregate(Aggregate {
+            input, aggr_expr, ..
+        }) => {
+            struct Rewriter<'a> {
+                plan: &'a LogicalPlan,
+                input: &'a LogicalPlan,
+                aggr_expr: &'a Vec<Expr>,
+            }
+
+            impl<'a> ExprRewriter for Rewriter<'a> {
+                fn mutate(&mut self, expr: Expr) -> Result<Expr> {
+                    let normalized_expr = normalize_col(expr.clone(), self.plan);
+                    if normalized_expr.is_err() {
+                        // The expr is not based on Aggregate plan output. Skip it.
+                        return Ok(expr);
+                    }
+                    let normalized_expr = normalized_expr.unwrap();
+                    if let Some(found_agg) =
+                        self.aggr_expr.iter().find(|a| (**a) == normalized_expr)
+                    {
+                        let agg = normalize_col(found_agg.clone(), self.plan)?;
+                        let col = Expr::Column(
+                            agg.to_field(self.input.schema())
+                                .map(|f| f.qualified_column())?,
+                        );
+                        Ok(col)
+                    } else {
+                        Ok(expr)
+                    }
+                }
+            }
+
+            expr.rewrite(&mut Rewriter {
+                plan,
+                input,
+                aggr_expr,
+            })
+        }
+        LogicalPlan::Projection(_) => rewrite_sort_col_by_aggs(expr, plan.inputs()[0]),
+        _ => Ok(expr),
+    }
+}

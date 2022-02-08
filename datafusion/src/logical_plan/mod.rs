@@ -25,6 +25,9 @@ pub(crate) mod builder;
 mod dfschema;
 mod display;
 mod expr;
+mod expr_rewriter;
+mod expr_simplier;
+mod expr_visitor;
 mod extension;
 mod operators;
 pub mod plan;
@@ -46,10 +49,11 @@ pub use expr::{
     rewrite_sort_cols_by_aggs, right, round, rpad, rtrim, sha224, sha256, sha384, sha512,
     signum, sin, split_part, sqrt, starts_with, strpos, substr, sum, tan, to_hex,
     translate, trim, trunc, unalias, unnormalize_col, unnormalize_cols, upper, when,
-    Column, Expr, ExprRewriter, ExprSchema, ExpressionVisitor, Literal, Recursion,
-    RewriteRecursion, SimplifyInfo,
+    Column, Expr, ExprSchema, Literal, Recursion, RewriteRecursion,
 };
-pub(crate) use expr::{ExprRewritable, ExprSimplifiable, ExprVisitable};
+pub use expr_rewriter::{ExprRewritable, ExprRewriter};
+pub use expr_simplier::SimplifyInfo;
+pub use expr_visitor::{ExprVisitable, ExpressionVisitor};
 pub use extension::UserDefinedLogicalNode;
 pub use operators::Operator;
 pub use plan::{
